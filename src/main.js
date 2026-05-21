@@ -1070,10 +1070,6 @@ function initScene(mount, mapboxMap) {
   objectLayer.visible = false;
   scene.add(objectLayer);
 
-  const sensoryLayer = createSensoryPedestrianLayer();
-  sensoryLayer.visible = false;
-  scene.add(sensoryLayer);
-
   const fbxLoader = new FBXLoader();
   loadModelIfAvailable(fbxLoader, CART_MODEL_PATH, (model) => {
     disposeChildren(cart);
@@ -1109,12 +1105,10 @@ function initScene(mount, mapboxMap) {
       prediction,
       mapLayer,
       objectLayer,
-      sensoryLayer,
       mapCameraGestureState,
       transitionProgress,
       cameraProgress
     });
-    updateSensoryPedestrians(sensoryLayer, elapsed);
 
     cart.position.y = Math.sin(elapsed * 1.4) * 0.025;
     renderer.render(scene, camera);
@@ -1207,7 +1201,6 @@ function updateSceneMode({
   prediction,
   mapLayer,
   objectLayer,
-  sensoryLayer,
   mapCameraGestureState,
   transitionProgress,
   cameraProgress
@@ -1218,8 +1211,6 @@ function updateSceneMode({
   const driveScale = DRIVE_CART_MODEL_SCALE * mapZoomScale;
   cart.rotation.y = lerpAngle(START_CART_YAW, driveCartYaw, cameraProgress);
   cart.scale.setScalar(lerp(1, driveScale, cameraProgress));
-  sensoryLayer.rotation.y = mapBearingYaw;
-  sensoryLayer.scale.setScalar(lerp(0.01, driveScale, cameraProgress));
 
   if (transitionProgress < 1) {
     camera.position.lerpVectors(START_CAMERA_POSITION, DRIVE_CAMERA_POSITION, cameraProgress);
@@ -1232,7 +1223,6 @@ function updateSceneMode({
   prediction.visible = false;
   mapLayer.visible = false;
   objectLayer.visible = false;
-  sensoryLayer.visible = transitionProgress > 0.58;
   prediction.material.opacity = 0;
 }
 
@@ -1244,132 +1234,6 @@ function createGround() {
   mesh.position.y = -0.03;
   mesh.receiveShadow = true;
   return mesh;
-}
-
-function createSensoryPedestrianLayer() {
-  const layer = new THREE.Group();
-  const pedestrians = [
-    { path: [[-4.8, -5.2], [-2.8, -4.5], [-1.7, -2.6], [-3.4, -1.5], [-5.4, -2.7]], phase: 0.02, speed: 0.18 },
-    { path: [[3.4, -6.4], [5.2, -5.2], [5.7, -2.8], [3.7, -2.0], [2.9, -4.3]], phase: 0.22, speed: 0.16 },
-    { path: [[-6.2, 0.4], [-4.7, 1.9], [-3.0, 1.5], [-3.8, -0.5], [-5.4, -1.2]], phase: 0.39, speed: 0.14 },
-    { path: [[4.9, 1.8], [3.3, 3.4], [4.1, 5.7], [6.1, 4.2], [6.5, 2.2]], phase: 0.57, speed: 0.17 },
-    { path: [[-1.7, -8.5], [0.8, -8.1], [1.5, -6.0], [-0.4, -5.0], [-2.3, -6.7]], phase: 0.74, speed: 0.15 },
-    { path: [[1.5, 5.0], [3.7, 5.9], [4.8, 7.5], [2.2, 7.8], [0.8, 6.5]], phase: 0.88, speed: 0.13 }
-  ];
-
-  pedestrians.forEach((config) => {
-    layer.add(createVoxelPedestrian(config));
-  });
-
-  return layer;
-}
-
-function createVoxelPedestrian({ path, phase, speed }) {
-  const [x, z] = path[0];
-  const nextPoint = path[1] ?? path[0];
-  const yaw = Math.atan2(nextPoint[0] - x, nextPoint[1] - z);
-  const group = new THREE.Group();
-  group.position.set(x, 0, z);
-  group.rotation.y = yaw;
-  group.userData = {
-    path,
-    yaw,
-    phase,
-    speed,
-    stride: 0.62
-  };
-
-  const bodyMaterial = new THREE.MeshStandardMaterial({
-    color: 0x007aff,
-    emissive: 0x007aff,
-    emissiveIntensity: 0.14,
-    roughness: 0.84,
-    transparent: true,
-    opacity: 0.94
-  });
-  const edgeMaterial = new THREE.MeshStandardMaterial({
-    color: 0x007aff,
-    emissive: 0x007aff,
-    emissiveIntensity: 0.14,
-    roughness: 0.88,
-    transparent: true,
-    opacity: 0.94
-  });
-
-  const parts = {
-    torso: addVoxelBox(group, [0.42, 0.7, 0.28], [0, 1.03, 0], bodyMaterial),
-    head: addVoxelBox(group, [0.34, 0.34, 0.34], [0, 1.61, 0], bodyMaterial),
-    leftArm: addVoxelBox(group, [0.16, 0.58, 0.18], [-0.34, 1.03, 0], edgeMaterial),
-    rightArm: addVoxelBox(group, [0.16, 0.58, 0.18], [0.34, 1.03, 0], edgeMaterial),
-    leftLeg: addVoxelBox(group, [0.17, 0.62, 0.19], [-0.12, 0.34, 0], edgeMaterial),
-    rightLeg: addVoxelBox(group, [0.17, 0.62, 0.19], [0.12, 0.34, 0], edgeMaterial)
-  };
-
-  parts.leftArm.geometry.translate(0, -0.2, 0);
-  parts.rightArm.geometry.translate(0, -0.2, 0);
-  parts.leftLeg.geometry.translate(0, -0.22, 0);
-  parts.rightLeg.geometry.translate(0, -0.22, 0);
-  group.userData.parts = parts;
-
-  const base = new THREE.Mesh(
-    new THREE.BoxGeometry(0.72, 0.025, 0.72),
-    new THREE.MeshStandardMaterial({
-      color: 0x007aff,
-      emissive: 0x007aff,
-      emissiveIntensity: 0.24,
-      roughness: 0.7,
-      transparent: true,
-      opacity: 0.22
-    })
-  );
-  base.position.y = 0.015;
-  group.add(base);
-
-  return group;
-}
-
-function addVoxelBox(parent, size, position, material) {
-  const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
-  mesh.position.set(...position);
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  parent.add(mesh);
-  return mesh;
-}
-
-function updateSensoryPedestrians(layer, elapsed) {
-  layer.children.forEach((pedestrian) => {
-    const { path, phase, speed, stride, parts } = pedestrian.userData;
-    const pathPosition = getLoopedPathPosition(path, elapsed * speed + phase);
-    const cycle = elapsed * speed * 30 + phase * Math.PI * 2;
-    const swing = Math.sin(cycle) * stride;
-    const bob = Math.abs(Math.sin(cycle)) * 0.035;
-
-    pedestrian.position.x = pathPosition.x;
-    pedestrian.position.z = pathPosition.z;
-    pedestrian.position.y = bob;
-    pedestrian.rotation.y = pathPosition.yaw;
-
-    parts.leftArm.rotation.x = swing;
-    parts.rightArm.rotation.x = -swing;
-    parts.leftLeg.rotation.x = -swing * 0.78;
-    parts.rightLeg.rotation.x = swing * 0.78;
-  });
-}
-
-function getLoopedPathPosition(path, progress) {
-  const scaledProgress = ((progress % 1) + 1) % 1 * path.length;
-  const index = Math.floor(scaledProgress);
-  const nextIndex = (index + 1) % path.length;
-  const alpha = smoothstep(scaledProgress - index);
-  const [x1, z1] = path[index];
-  const [x2, z2] = path[nextIndex];
-
-  return {
-    x: lerp(x1, x2, alpha),
-    z: lerp(z1, z2, alpha),
-    yaw: Math.atan2(x2 - x1, z2 - z1)
-  };
 }
 
 function createPredictionPath() {
