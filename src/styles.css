@@ -1,0 +1,264 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #111827;
+  background: #ffffff;
+  font-synthesis: none;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+.screen {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  min-width: 320px;
+  background: #ffffff;
+}
+
+.scene-canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.scene-canvas canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.hud {
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+}
+
+.autonomy-status {
+  position: absolute;
+  top: max(22px, env(safe-area-inset-top));
+  left: max(24px, env(safe-area-inset-left));
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  color: #8a949e;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: 0 10px 24px rgba(87, 100, 113, 0.12);
+  backdrop-filter: blur(10px);
+}
+
+.autonomy-status.is-active {
+  color: #2383ff;
+}
+
+.autonomy-status svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.speed-readout {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  left: 50%;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 8px;
+  min-width: 150px;
+  transform: translateX(-50%);
+  color: #101820;
+  font-variant-numeric: tabular-nums;
+}
+
+.speed-number {
+  font-size: clamp(62px, 8vh, 96px);
+  line-height: 0.95;
+  font-weight: 650;
+}
+
+.speed-unit {
+  font-size: clamp(17px, 2vh, 24px);
+  line-height: 1;
+  font-weight: 560;
+  color: #59636e;
+}
+
+.mini-map {
+  position: absolute;
+  top: max(-160px, calc(env(safe-area-inset-top) - 160px));
+  right: max(-160px, calc(env(safe-area-inset-right) - 160px));
+  width: 520px;
+  min-width: 520px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow:
+    0 0 120px rgba(255, 255, 255, 1),
+    0 0 180px rgba(255, 255, 255, 1);
+  overflow: visible;
+}
+
+.mini-map-clip,
+.map-fade,
+.map-stroke {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.mini-map-clip {
+  overflow: hidden;
+  -webkit-mask: radial-gradient(
+    circle,
+    #000000 0 52%,
+    rgba(0, 0, 0, 0.48) 68%,
+    rgba(0, 0, 0, 0.08) 80%,
+    transparent 92%
+  );
+  mask: radial-gradient(
+    circle,
+    #000000 0 52%,
+    rgba(0, 0, 0, 0.48) 68%,
+    rgba(0, 0, 0, 0.08) 80%,
+    transparent 92%
+  );
+  z-index: 1;
+}
+
+.map-fade,
+.map-stroke {
+  pointer-events: none;
+}
+
+.map-fade {
+  background: #ffffff;
+  transform: scale(1.16);
+  z-index: 2;
+}
+
+.map-fade-outer {
+  -webkit-mask: radial-gradient(
+    circle,
+    transparent 0 54%,
+    rgba(0, 0, 0, 0.82) 72%,
+    #000000 84%,
+    #000000 100%
+  );
+  mask: radial-gradient(
+    circle,
+    transparent 0 54%,
+    rgba(0, 0, 0, 0.82) 72%,
+    #000000 84%,
+    #000000 100%
+  );
+  filter: blur(16px);
+}
+
+.map-fade-inner {
+  -webkit-mask: radial-gradient(
+    circle,
+    transparent 0 60%,
+    rgba(0, 0, 0, 0.9) 78%,
+    #000000 100%
+  );
+  mask: radial-gradient(
+    circle,
+    transparent 0 60%,
+    rgba(0, 0, 0, 0.9) 78%,
+    #000000 100%
+  );
+  filter: blur(12px);
+}
+
+.map-stroke-soft {
+  border: 14px solid #ffffff;
+  filter: blur(3px);
+  transform: scale(1.16);
+  z-index: 3;
+}
+
+.map-stroke-hard {
+  border: 5px solid #ffffff;
+  z-index: 4;
+}
+
+.mini-map svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.map-roads path:nth-child(1),
+.map-roads path:nth-child(2) {
+  stroke: rgba(205, 214, 222, 0.76);
+  stroke-width: 9;
+}
+
+.map-roads path:nth-child(3),
+.map-roads path:nth-child(4) {
+  stroke: rgba(219, 226, 232, 0.76);
+  stroke-width: 7;
+}
+
+.map-route {
+  fill: none;
+  stroke: url("#mapRouteGradient");
+  stroke-width: 8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.map-cart {
+  fill: #1e88ff;
+  stroke: #ffffff;
+  stroke-width: 4;
+}
+
+.map-pin path {
+  fill: #e22c3a;
+}
+
+.map-pin circle {
+  fill: #ffffff;
+}
+
+@media (max-width: 720px) {
+  .autonomy-status {
+    width: 42px;
+    height: 42px;
+  }
+
+  .mini-map {
+    top: -108px;
+    right: -108px;
+    width: 340px;
+    min-width: 340px;
+  }
+
+  .speed-readout {
+    top: 16px;
+  }
+
+  .speed-number {
+    font-size: 58px;
+  }
+}
