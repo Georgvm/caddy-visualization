@@ -17,6 +17,7 @@ const CART_MODEL_YAW_OFFSET = 0;
 const CART_MODEL_PATH = '/models/Electric_Cart.fbx';
 const START_CART_MODEL_TARGET_LENGTH = 3.15;
 const DRIVE_CART_MODEL_SCALE = 0.2;
+const DRIVE_CART_VISUAL_SCALE = 0.7;
 const EGO_OBJECT_CLEAR_RADIUS_METERS = 3.4;
 const START_CAMERA_POSITION = new THREE.Vector3(-3.9, 2.65, 4.8);
 const START_CAMERA_TARGET = new THREE.Vector3(0, 0.92, 0.18);
@@ -25,7 +26,8 @@ const DRIVE_CAMERA_TARGET = new THREE.Vector3(0, 0, 0);
 const START_CART_YAW = 0;
 const START_TRANSITION_MS = 1800;
 const CAMERA_RETURN_POSITION_LERP = 0.16;
-const MAP_CAMERA_BASE_ZOOM = 18.7;
+const MAP_CAMERA_BASE_ZOOM_MULTIPLIER = 5;
+const MAP_CAMERA_BASE_ZOOM = 18.7 + Math.log2(MAP_CAMERA_BASE_ZOOM_MULTIPLIER);
 const MAP_CAMERA_BASE_PITCH = 58;
 const MAP_CAMERA_RETURN_DELAY_MS = 560;
 const MAP_CAMERA_RETURN_LERP = 0.12;
@@ -52,17 +54,12 @@ root.innerHTML = `
     <div class="scene-canvas" aria-label="3D autonomy visualization"></div>
     <section class="start-screen" aria-label="Start drive">
       <h1>Hey, Sam!</h1>
-      <button class="start-button" type="button">Start</button>
+      <button class="start-ride-button" type="button">
+        <canvas class="start-ride-dots" aria-hidden="true"></canvas>
+        <span>START RIDE</span>
+      </button>
     </section>
     <section class="hud is-hidden" aria-label="Autonomous golf cart dashboard">
-      <div class="autonomy-status" aria-label="Self driving status">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M5.1 13.4a7 7 0 1 1 13.8 0" />
-          <path d="M8.1 13.9a4 4 0 0 1 7.8 0" />
-          <path d="M4.6 14.4c2.3 1.7 4.8 2.5 7.4 2.5s5.1-.8 7.4-2.5" />
-          <path d="M12 16.9v3.1" />
-        </svg>
-      </div>
       <div class="speed-readout" aria-label="Speed">
         <span class="speed-number">0</span>
         <span class="speed-unit">mph</span>
@@ -109,10 +106,10 @@ const ui = {
   screen: document.querySelector('.screen'),
   mapbox: document.querySelector('.mapbox-scene'),
   startScreen: document.querySelector('.start-screen'),
-  startButton: document.querySelector('.start-button'),
+  startButton: document.querySelector('.start-ride-button'),
+  startDots: document.querySelector('.start-ride-dots'),
   hud: document.querySelector('.hud'),
   speed: document.querySelector('.speed-number'),
-  autonomy: document.querySelector('.autonomy-status'),
   route: document.querySelector('.map-route'),
   cart: document.querySelector('.map-cart'),
   pin: document.querySelector('.map-pin')
@@ -123,6 +120,7 @@ let replayStartMs = performance.now();
 let driveStarted = false;
 let transitionStartMs = null;
 updateHud(currentFrame);
+initStartRideDots(ui.startDots);
 
 const mapboxMap = initMapboxMap(ui.mapbox);
 initScene(document.querySelector('.scene-canvas'), mapboxMap);
@@ -137,11 +135,89 @@ ui.startButton.addEventListener('click', () => {
   ui.hud.classList.remove('is-hidden');
 });
 
+function initStartRideDots(canvas) {
+  const ctx = canvas.getContext('2d');
+  const dotSpacing = 5;
+  let dots = [];
+
+  const resizeCanvas = () => {
+    const rect = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    dots = createStartRideDotField(rect.width, rect.height, dotSpacing);
+  };
+
+  const drawDots = () => {
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    const now = performance.now() * 0.001;
+
+    ctx.clearRect(0, 0, width, height);
+
+    dots.forEach((dot) => {
+      const normalizedY = Math.abs(dot.y - height / 2) / (height / 2);
+      const centerDim = 0.24 + 0.76 * normalizedY;
+      const shimmer = (
+        Math.sin(now * dot.speed + dot.phase)
+        + Math.sin(now * 1.7 + dot.x * 0.04 + dot.y * 0.13)
+        + Math.sin(now * 2.2 - dot.x * 0.025 + dot.phase * 0.6)
+      ) / 3;
+      const pulse = (shimmer + 1) / 2;
+      const opacity = (0.12 + pulse * dot.intensity * 0.58) * centerDim;
+
+      ctx.globalAlpha = opacity;
+      ctx.fillStyle = 'white';
+      ctx.beginPath();
+      ctx.arc(dot.x, dot.y, dot.radius, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    ctx.globalAlpha = 1;
+  };
+
+  const tick = () => {
+    if (!driveStarted) {
+      drawDots();
+      window.requestAnimationFrame(tick);
+    }
+  };
+
+  resizeCanvas();
+  tick();
+  window.addEventListener('resize', () => {
+    resizeCanvas();
+    drawDots();
+  });
+}
+
+function createStartRideDotField(width, height, spacing) {
+  const cols = Math.max(1, Math.floor(width / spacing));
+  const rows = Math.max(1, Math.floor(height / spacing));
+  const insetX = (width - (cols - 1) * spacing) / 2;
+  const insetY = (height - (rows - 1) * spacing) / 2;
+
+  return Array.from({ length: cols * rows }, (_, index) => {
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    return {
+      x: insetX + col * spacing,
+      y: insetY + row * spacing,
+      radius: 0.8,
+      intensity: randomRange(0.45, 1),
+      phase: randomRange(0, Math.PI * 2),
+      speed: randomRange(1.2, 4.8)
+    };
+  });
+}
+
+function randomRange(min, max) {
+  return min + Math.random() * (max - min);
+}
+
 function updateHud(frame) {
   ui.speed.textContent = frame.speedMph;
-  ui.autonomy.classList.toggle('is-active', frame.selfDriving);
-  ui.autonomy.classList.toggle('is-inactive', !frame.selfDriving);
-  ui.autonomy.setAttribute('aria-label', `Self driving ${frame.selfDriving ? 'active' : 'inactive'}`);
   ui.route.setAttribute('points', frame.route.map((point) => `${point.x},${point.y}`).join(' '));
   ui.cart.setAttribute('cx', frame.position.x);
   ui.cart.setAttribute('cy', frame.position.y);
@@ -221,71 +297,23 @@ function initMapboxMap(container) {
 
   map.on('style.load', () => {
     map.setProjection('globe');
-    addMapboxRouteLayers(map);
     updateMapboxRoute(map, currentFrame);
   });
 
   return map;
 }
 
-function addMapboxRouteLayers(map) {
-  if (!map.getSource('cart-route')) {
-    map.addSource('cart-route', {
-      type: 'geojson',
-      data: createRouteFeatureCollection(telemetry.routeCoordinates)
-    });
-  }
-
-  if (!map.getLayer('cart-route-casing')) {
-    map.addLayer({
-      id: 'cart-route-casing',
-      type: 'line',
-      source: 'cart-route',
-      slot: 'top',
-      layout: {
-        'line-cap': 'round',
-        'line-join': 'round'
-      },
-      paint: {
-        'line-color': '#ffffff',
-        'line-width': 12,
-        'line-opacity': 0.88
-      }
-    });
-  }
-
-  if (!map.getLayer('cart-route-line')) {
-    map.addLayer({
-      id: 'cart-route-line',
-      type: 'line',
-      source: 'cart-route',
-      slot: 'top',
-      layout: {
-        'line-cap': 'round',
-        'line-join': 'round'
-      },
-      paint: {
-        'line-color': '#1683ff',
-        'line-width': 9,
-        'line-opacity': 0.98
-      }
-    });
-  }
-}
-
 function updateMapboxRoute(map, frame, cameraGestureState = null) {
-  if (!map || !frame.mapbox || !map.getSource('cart-route')) return;
+  if (!map || !frame.mapbox) return;
 
   const { coordinate, bearing } = frame.mapbox;
-  const source = map.getSource('cart-route');
-  if (source) source.setData(createRouteFeatureCollection(telemetry.routeCoordinates));
   const bearingOffset = cameraGestureState?.bearingOffset ?? 0;
   const pitchOffset = cameraGestureState?.pitchOffset ?? 0;
   const zoomOffset = cameraGestureState?.zoomOffset ?? 0;
 
   map.jumpTo({
     center: [coordinate.longitude, coordinate.latitude],
-    zoom: clamp(MAP_CAMERA_BASE_ZOOM + zoomOffset, 16.9, 20.2),
+    zoom: clamp(MAP_CAMERA_BASE_ZOOM + zoomOffset, 16.9, 22),
     bearing: bearing + MAPBOX_CAMERA_BEARING_OFFSET + bearingOffset,
     pitch: clamp(MAP_CAMERA_BASE_PITCH + pitchOffset, 25, 75)
   });
@@ -1042,6 +1070,10 @@ function initScene(mount, mapboxMap) {
   objectLayer.visible = false;
   scene.add(objectLayer);
 
+  const sensoryLayer = createSensoryPedestrianLayer();
+  sensoryLayer.visible = false;
+  scene.add(sensoryLayer);
+
   const fbxLoader = new FBXLoader();
   loadModelIfAvailable(fbxLoader, CART_MODEL_PATH, (model) => {
     disposeChildren(cart);
@@ -1077,10 +1109,12 @@ function initScene(mount, mapboxMap) {
       prediction,
       mapLayer,
       objectLayer,
+      sensoryLayer,
       mapCameraGestureState,
       transitionProgress,
       cameraProgress
     });
+    updateSensoryPedestrians(sensoryLayer, elapsed);
 
     cart.position.y = Math.sin(elapsed * 1.4) * 0.025;
     renderer.render(scene, camera);
@@ -1173,15 +1207,19 @@ function updateSceneMode({
   prediction,
   mapLayer,
   objectLayer,
+  sensoryLayer,
   mapCameraGestureState,
   transitionProgress,
   cameraProgress
 }) {
   const mapBearingYaw = degreesToRadians(mapCameraGestureState?.bearingOffset ?? 0);
   const driveCartYaw = getPathHeading(currentFrame.predictedPath) + CART_MODEL_YAW_OFFSET + mapBearingYaw;
-  const mapZoomScale = 2 ** (mapCameraGestureState?.zoomOffset ?? 0);
+  const mapZoomScale = MAP_CAMERA_BASE_ZOOM_MULTIPLIER * DRIVE_CART_VISUAL_SCALE * (2 ** (mapCameraGestureState?.zoomOffset ?? 0));
+  const driveScale = DRIVE_CART_MODEL_SCALE * mapZoomScale;
   cart.rotation.y = lerpAngle(START_CART_YAW, driveCartYaw, cameraProgress);
-  cart.scale.setScalar(lerp(1, DRIVE_CART_MODEL_SCALE * mapZoomScale, cameraProgress));
+  cart.scale.setScalar(lerp(1, driveScale, cameraProgress));
+  sensoryLayer.rotation.y = mapBearingYaw;
+  sensoryLayer.scale.setScalar(lerp(0.01, driveScale, cameraProgress));
 
   if (transitionProgress < 1) {
     camera.position.lerpVectors(START_CAMERA_POSITION, DRIVE_CAMERA_POSITION, cameraProgress);
@@ -1194,6 +1232,7 @@ function updateSceneMode({
   prediction.visible = false;
   mapLayer.visible = false;
   objectLayer.visible = false;
+  sensoryLayer.visible = transitionProgress > 0.58;
   prediction.material.opacity = 0;
 }
 
@@ -1205,6 +1244,132 @@ function createGround() {
   mesh.position.y = -0.03;
   mesh.receiveShadow = true;
   return mesh;
+}
+
+function createSensoryPedestrianLayer() {
+  const layer = new THREE.Group();
+  const pedestrians = [
+    { path: [[-4.8, -5.2], [-2.8, -4.5], [-1.7, -2.6], [-3.4, -1.5], [-5.4, -2.7]], phase: 0.02, speed: 0.18 },
+    { path: [[3.4, -6.4], [5.2, -5.2], [5.7, -2.8], [3.7, -2.0], [2.9, -4.3]], phase: 0.22, speed: 0.16 },
+    { path: [[-6.2, 0.4], [-4.7, 1.9], [-3.0, 1.5], [-3.8, -0.5], [-5.4, -1.2]], phase: 0.39, speed: 0.14 },
+    { path: [[4.9, 1.8], [3.3, 3.4], [4.1, 5.7], [6.1, 4.2], [6.5, 2.2]], phase: 0.57, speed: 0.17 },
+    { path: [[-1.7, -8.5], [0.8, -8.1], [1.5, -6.0], [-0.4, -5.0], [-2.3, -6.7]], phase: 0.74, speed: 0.15 },
+    { path: [[1.5, 5.0], [3.7, 5.9], [4.8, 7.5], [2.2, 7.8], [0.8, 6.5]], phase: 0.88, speed: 0.13 }
+  ];
+
+  pedestrians.forEach((config) => {
+    layer.add(createVoxelPedestrian(config));
+  });
+
+  return layer;
+}
+
+function createVoxelPedestrian({ path, phase, speed }) {
+  const [x, z] = path[0];
+  const nextPoint = path[1] ?? path[0];
+  const yaw = Math.atan2(nextPoint[0] - x, nextPoint[1] - z);
+  const group = new THREE.Group();
+  group.position.set(x, 0, z);
+  group.rotation.y = yaw;
+  group.userData = {
+    path,
+    yaw,
+    phase,
+    speed,
+    stride: 0.62
+  };
+
+  const bodyMaterial = new THREE.MeshStandardMaterial({
+    color: 0x007aff,
+    emissive: 0x007aff,
+    emissiveIntensity: 0.14,
+    roughness: 0.84,
+    transparent: true,
+    opacity: 0.94
+  });
+  const edgeMaterial = new THREE.MeshStandardMaterial({
+    color: 0x007aff,
+    emissive: 0x007aff,
+    emissiveIntensity: 0.14,
+    roughness: 0.88,
+    transparent: true,
+    opacity: 0.94
+  });
+
+  const parts = {
+    torso: addVoxelBox(group, [0.42, 0.7, 0.28], [0, 1.03, 0], bodyMaterial),
+    head: addVoxelBox(group, [0.34, 0.34, 0.34], [0, 1.61, 0], bodyMaterial),
+    leftArm: addVoxelBox(group, [0.16, 0.58, 0.18], [-0.34, 1.03, 0], edgeMaterial),
+    rightArm: addVoxelBox(group, [0.16, 0.58, 0.18], [0.34, 1.03, 0], edgeMaterial),
+    leftLeg: addVoxelBox(group, [0.17, 0.62, 0.19], [-0.12, 0.34, 0], edgeMaterial),
+    rightLeg: addVoxelBox(group, [0.17, 0.62, 0.19], [0.12, 0.34, 0], edgeMaterial)
+  };
+
+  parts.leftArm.geometry.translate(0, -0.2, 0);
+  parts.rightArm.geometry.translate(0, -0.2, 0);
+  parts.leftLeg.geometry.translate(0, -0.22, 0);
+  parts.rightLeg.geometry.translate(0, -0.22, 0);
+  group.userData.parts = parts;
+
+  const base = new THREE.Mesh(
+    new THREE.BoxGeometry(0.72, 0.025, 0.72),
+    new THREE.MeshStandardMaterial({
+      color: 0x007aff,
+      emissive: 0x007aff,
+      emissiveIntensity: 0.24,
+      roughness: 0.7,
+      transparent: true,
+      opacity: 0.22
+    })
+  );
+  base.position.y = 0.015;
+  group.add(base);
+
+  return group;
+}
+
+function addVoxelBox(parent, size, position, material) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
+  mesh.position.set(...position);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  parent.add(mesh);
+  return mesh;
+}
+
+function updateSensoryPedestrians(layer, elapsed) {
+  layer.children.forEach((pedestrian) => {
+    const { path, phase, speed, stride, parts } = pedestrian.userData;
+    const pathPosition = getLoopedPathPosition(path, elapsed * speed + phase);
+    const cycle = elapsed * speed * 30 + phase * Math.PI * 2;
+    const swing = Math.sin(cycle) * stride;
+    const bob = Math.abs(Math.sin(cycle)) * 0.035;
+
+    pedestrian.position.x = pathPosition.x;
+    pedestrian.position.z = pathPosition.z;
+    pedestrian.position.y = bob;
+    pedestrian.rotation.y = pathPosition.yaw;
+
+    parts.leftArm.rotation.x = swing;
+    parts.rightArm.rotation.x = -swing;
+    parts.leftLeg.rotation.x = -swing * 0.78;
+    parts.rightLeg.rotation.x = swing * 0.78;
+  });
+}
+
+function getLoopedPathPosition(path, progress) {
+  const scaledProgress = ((progress % 1) + 1) % 1 * path.length;
+  const index = Math.floor(scaledProgress);
+  const nextIndex = (index + 1) % path.length;
+  const alpha = smoothstep(scaledProgress - index);
+  const [x1, z1] = path[index];
+  const [x2, z2] = path[nextIndex];
+
+  return {
+    x: lerp(x1, x2, alpha),
+    z: lerp(z1, z2, alpha),
+    yaw: Math.atan2(x2 - x1, z2 - z1)
+  };
 }
 
 function createPredictionPath() {
@@ -1376,10 +1541,12 @@ function normalizeCartModel(model) {
 
     child.castShadow = true;
     child.receiveShadow = true;
+    smoothGeometryNormalsByPosition(child.geometry);
     if (child.material) {
       const materials = Array.isArray(child.material) ? child.material : [child.material];
       materials.forEach((material) => {
         material.side = THREE.FrontSide;
+        if ('flatShading' in material) material.flatShading = false;
         material.needsUpdate = true;
         if (material.map) {
           material.map.colorSpace = THREE.SRGBColorSpace;
@@ -1391,6 +1558,55 @@ function normalizeCartModel(model) {
 
   fitModelToCartEnvelope(model);
   return wrapper;
+}
+
+function smoothGeometryNormalsByPosition(geometry) {
+  const position = geometry?.attributes?.position;
+  if (!position || position.count < 3) return;
+
+  const normal = new Float32Array(position.count * 3);
+  const accumulatedNormals = new Map();
+  const triangleNormal = new THREE.Vector3();
+  const edgeA = new THREE.Vector3();
+  const edgeB = new THREE.Vector3();
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+
+  const getKey = (index) => {
+    const x = Math.round(position.getX(index) * 10000);
+    const y = Math.round(position.getY(index) * 10000);
+    const z = Math.round(position.getZ(index) * 10000);
+    return `${x},${y},${z}`;
+  };
+
+  for (let index = 0; index < position.count; index += 3) {
+    a.fromBufferAttribute(position, index);
+    b.fromBufferAttribute(position, index + 1);
+    c.fromBufferAttribute(position, index + 2);
+    edgeA.subVectors(b, a);
+    edgeB.subVectors(c, a);
+    triangleNormal.crossVectors(edgeA, edgeB).normalize();
+
+    [index, index + 1, index + 2].forEach((vertexIndex) => {
+      const key = getKey(vertexIndex);
+      const current = accumulatedNormals.get(key) ?? new THREE.Vector3();
+      current.add(triangleNormal);
+      accumulatedNormals.set(key, current);
+    });
+  }
+
+  accumulatedNormals.forEach((value) => value.normalize());
+
+  for (let index = 0; index < position.count; index += 1) {
+    const averagedNormal = accumulatedNormals.get(getKey(index));
+    normal[index * 3] = averagedNormal.x;
+    normal[index * 3 + 1] = averagedNormal.y;
+    normal[index * 3 + 2] = averagedNormal.z;
+  }
+
+  geometry.setAttribute('normal', new THREE.BufferAttribute(normal, 3));
+  geometry.attributes.normal.needsUpdate = true;
 }
 
 function fitModelToCartEnvelope(model) {

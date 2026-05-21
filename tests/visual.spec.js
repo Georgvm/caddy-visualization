@@ -3,10 +3,10 @@ import { expect, test } from '@playwright/test';
 test('start screen transitions into HUD and nonblank WebGL scene', async ({ page }) => {
   await page.goto('http://localhost:5173');
   await expect(page.getByRole('heading', { name: 'Hey, Sam!' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Start' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'START RIDE' })).toBeVisible();
   await expect(page.locator('.scene-canvas canvas')).toBeVisible();
   await page.waitForTimeout(900);
-  await page.getByRole('button', { name: 'Start' }).click();
+  await page.getByRole('button', { name: 'START RIDE' }).click();
   await expect(page.locator('.screen')).toHaveClass(/is-driving/);
   await page.waitForTimeout(2200);
   await expect(page.locator('.speed-readout')).toBeVisible();
