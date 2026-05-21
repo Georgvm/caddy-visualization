@@ -2,14 +2,13 @@ import * as THREE from 'three';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import './styles.css';
 
 const SCENE_LIMIT_METERS = 42;
 const MAP_CENTER = 110;
 const MAP_SCALE = 2.45;
-const MAPBOX_ACCESS_TOKEN = 'pk.eyJ1IjoibXl6b21hcCIsImEiOiJjbTBnOWx1eWoxNzc4MnFwdXZqNzl5bmhrIn0.P8CDFlyi9xvQZs9htiaKNg';
+const MAPBOX_ACCESS_TOKEN = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN ?? '';
 const ROUTE_START = { latitude: 37.42885, longitude: -122.17315 };
 const ROUTE_END = { latitude: 37.42874, longitude: -122.17265 };
 const ROUTE_ANIMATION_SECONDS = 12;
@@ -26,12 +25,19 @@ const DRIVE_CAMERA_TARGET = new THREE.Vector3(0, 0, 0);
 const START_CART_YAW = 0;
 const START_TRANSITION_MS = 1800;
 const CAMERA_RETURN_POSITION_LERP = 0.16;
+const MAP_CAMERA_BASE_ZOOM = 18.7;
+const MAP_CAMERA_BASE_PITCH = 58;
+const MAP_CAMERA_RETURN_DELAY_MS = 560;
+const MAP_CAMERA_RETURN_LERP = 0.12;
 const DATA_SOURCES = [
   { type: 'segmentation', path: '/data/segmentation.json' },
   { type: 'sparsedrive', path: '/data/bev_predictions.json' }
 ];
 
 mapboxgl.accessToken = MAPBOX_ACCESS_TOKEN;
+if (!MAPBOX_ACCESS_TOKEN) {
+  console.warn('Missing VITE_MAPBOX_ACCESS_TOKEN. Add it to .env.local to render the Mapbox scene.');
+}
 
 const telemetry = createMapboxRouteTelemetry();
 const SOURCE_FRAME_INTERVAL_MS = 1000 / telemetry.frameRateHz;
@@ -267,18 +273,21 @@ function addMapboxRouteLayers(map) {
   }
 }
 
-function updateMapboxRoute(map, frame) {
+function updateMapboxRoute(map, frame, cameraGestureState = null) {
   if (!map || !frame.mapbox || !map.getSource('cart-route')) return;
 
   const { coordinate, bearing } = frame.mapbox;
   const source = map.getSource('cart-route');
   if (source) source.setData(createRouteFeatureCollection(telemetry.routeCoordinates));
+  const bearingOffset = cameraGestureState?.bearingOffset ?? 0;
+  const pitchOffset = cameraGestureState?.pitchOffset ?? 0;
+  const zoomOffset = cameraGestureState?.zoomOffset ?? 0;
 
   map.jumpTo({
     center: [coordinate.longitude, coordinate.latitude],
-    zoom: 18.7,
-    bearing: bearing + MAPBOX_CAMERA_BEARING_OFFSET,
-    pitch: 58
+    zoom: clamp(MAP_CAMERA_BASE_ZOOM + zoomOffset, 16.9, 20.2),
+    bearing: bearing + MAPBOX_CAMERA_BEARING_OFFSET + bearingOffset,
+    pitch: clamp(MAP_CAMERA_BASE_PITCH + pitchOffset, 25, 75)
   });
 }
 
@@ -1007,8 +1016,7 @@ function initScene(mount, mapboxMap) {
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   mount.appendChild(renderer.domElement);
 
-  const controlsState = { active: false };
-  const controls = createCartOrbitControls(camera, renderer.domElement, controlsState);
+  const mapCameraGestureState = createMapCameraGestureState(renderer.domElement);
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0xdde4ea, 2.4));
 
@@ -1058,7 +1066,8 @@ function initScene(mount, mapboxMap) {
     const cameraProgress = easeInOutCubic(transitionProgress);
     currentFrame = getInterpolatedFrame(performance.now());
     updateHud(currentFrame);
-    updateMapboxRoute(mapboxMap, currentFrame);
+    updateMapCameraGestureState(mapCameraGestureState, transitionProgress, nowMs);
+    updateMapboxRoute(mapboxMap, currentFrame, mapCameraGestureState);
     replaceMapElements(mapLayer, currentFrame.mapElements);
     replaceSceneObjects(objectLayer, currentFrame.objects);
     updatePredictionPath(prediction, currentFrame.predictedPath);
@@ -1068,8 +1077,7 @@ function initScene(mount, mapboxMap) {
       prediction,
       mapLayer,
       objectLayer,
-      controls,
-      controlsState,
+      mapCameraGestureState,
       transitionProgress,
       cameraProgress
     });
@@ -1086,29 +1094,77 @@ function getStartTransitionProgress(nowMs) {
   return clamp((nowMs - transitionStartMs) / START_TRANSITION_MS, 0, 1);
 }
 
-function createCartOrbitControls(camera, element, controlsState) {
-  const controls = new OrbitControls(camera, element);
-  controls.enabled = false;
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.12;
-  controls.enablePan = false;
-  controls.minDistance = 5.2;
-  controls.maxDistance = 22;
-  controls.minPolarAngle = 0.16;
-  controls.maxPolarAngle = Math.PI * 0.48;
-  controls.rotateSpeed = 0.55;
-  controls.zoomSpeed = 0.72;
-  controls.target.copy(DRIVE_CAMERA_TARGET);
-  controls.addEventListener('start', () => {
-    if (driveStarted && getStartTransitionProgress(performance.now()) >= 1) {
-      controlsState.active = true;
-    }
-  });
-  controls.addEventListener('end', () => {
-    controlsState.active = false;
+function createMapCameraGestureState(element) {
+  const state = {
+    isDragging: false,
+    pointerId: null,
+    lastX: 0,
+    lastY: 0,
+    lastInteractionMs: 0,
+    bearingOffset: 0,
+    pitchOffset: 0,
+    zoomOffset: 0
+  };
+
+  const canInteract = () => driveStarted && getStartTransitionProgress(performance.now()) >= 1;
+
+  element.addEventListener('pointerdown', (event) => {
+    if (!canInteract()) return;
+    state.isDragging = true;
+    state.pointerId = event.pointerId;
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    state.lastInteractionMs = performance.now();
+    element.setPointerCapture(event.pointerId);
   });
 
-  return controls;
+  element.addEventListener('pointermove', (event) => {
+    if (!state.isDragging || event.pointerId !== state.pointerId) return;
+    const dx = event.clientX - state.lastX;
+    const dy = event.clientY - state.lastY;
+    state.bearingOffset += dx * 0.18;
+    state.pitchOffset = clamp(state.pitchOffset - dy * 0.08, -28, 18);
+    state.lastX = event.clientX;
+    state.lastY = event.clientY;
+    state.lastInteractionMs = performance.now();
+  });
+
+  const endDrag = (event) => {
+    if (event.pointerId !== state.pointerId) return;
+    state.isDragging = false;
+    state.pointerId = null;
+    state.lastInteractionMs = performance.now();
+  };
+
+  element.addEventListener('pointerup', endDrag);
+  element.addEventListener('pointercancel', endDrag);
+
+  element.addEventListener('wheel', (event) => {
+    if (!canInteract()) return;
+    event.preventDefault();
+    state.zoomOffset = clamp(state.zoomOffset - event.deltaY * 0.002, -1.4, 1.5);
+    state.lastInteractionMs = performance.now();
+  }, { passive: false });
+
+  return state;
+}
+
+function updateMapCameraGestureState(state, transitionProgress, nowMs) {
+  if (transitionProgress < 1) {
+    state.isDragging = false;
+    state.pointerId = null;
+    state.bearingOffset = 0;
+    state.pitchOffset = 0;
+    state.zoomOffset = 0;
+    return;
+  }
+
+  const shouldReturn = !state.isDragging && nowMs - state.lastInteractionMs > MAP_CAMERA_RETURN_DELAY_MS;
+  if (!shouldReturn) return;
+
+  state.bearingOffset = lerp(state.bearingOffset, 0, MAP_CAMERA_RETURN_LERP);
+  state.pitchOffset = lerp(state.pitchOffset, 0, MAP_CAMERA_RETURN_LERP);
+  state.zoomOffset = lerp(state.zoomOffset, 0, MAP_CAMERA_RETURN_LERP);
 }
 
 function updateSceneMode({
@@ -1117,29 +1173,22 @@ function updateSceneMode({
   prediction,
   mapLayer,
   objectLayer,
-  controls,
-  controlsState,
+  mapCameraGestureState,
   transitionProgress,
   cameraProgress
 }) {
-  const driveCartYaw = getPathHeading(currentFrame.predictedPath) + CART_MODEL_YAW_OFFSET;
+  const mapBearingYaw = degreesToRadians(mapCameraGestureState?.bearingOffset ?? 0);
+  const driveCartYaw = getPathHeading(currentFrame.predictedPath) + CART_MODEL_YAW_OFFSET + mapBearingYaw;
+  const mapZoomScale = 2 ** (mapCameraGestureState?.zoomOffset ?? 0);
   cart.rotation.y = lerpAngle(START_CART_YAW, driveCartYaw, cameraProgress);
-  cart.scale.setScalar(lerp(1, DRIVE_CART_MODEL_SCALE, cameraProgress));
+  cart.scale.setScalar(lerp(1, DRIVE_CART_MODEL_SCALE * mapZoomScale, cameraProgress));
 
   if (transitionProgress < 1) {
-    controls.enabled = false;
     camera.position.lerpVectors(START_CAMERA_POSITION, DRIVE_CAMERA_POSITION, cameraProgress);
     camera.lookAt(new THREE.Vector3().lerpVectors(START_CAMERA_TARGET, DRIVE_CAMERA_TARGET, cameraProgress));
-    controls.target.copy(DRIVE_CAMERA_TARGET);
   } else {
-    controls.enabled = true;
-    controls.target.copy(DRIVE_CAMERA_TARGET);
-    if (controlsState.active) {
-      controls.update();
-    } else {
-      camera.position.lerp(DRIVE_CAMERA_POSITION, CAMERA_RETURN_POSITION_LERP);
-      camera.lookAt(DRIVE_CAMERA_TARGET);
-    }
+    camera.position.lerp(DRIVE_CAMERA_POSITION, CAMERA_RETURN_POSITION_LERP);
+    camera.lookAt(DRIVE_CAMERA_TARGET);
   }
 
   prediction.visible = false;

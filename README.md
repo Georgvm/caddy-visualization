@@ -6,8 +6,11 @@ Localhost dashboard for a self-driving Stanford campus golf cart. It renders a w
 
 ```bash
 npm install
+cp .env.example .env.local
 npm run dev
 ```
+
+Set `VITE_MAPBOX_ACCESS_TOKEN` in `.env.local` before starting the app so the Mapbox campus scene can render.
 
 Open the URL printed by Vite. The dev server binds to `0.0.0.0`, so it can also be viewed from another device on the same network.
 
