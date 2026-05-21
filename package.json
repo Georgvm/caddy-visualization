@@ -10,6 +10,7 @@
     "test:visual": "playwright test"
   },
   "dependencies": {
+    "mapbox-gl": "^3.24.0",
     "three": "^0.178.0",
     "vite": "^7.3.3"
   },

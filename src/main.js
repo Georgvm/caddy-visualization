@@ -1,28 +1,54 @@
 import * as THREE from 'three';
+import mapboxgl from 'mapbox-gl';
+import 'mapbox-gl/dist/mapbox-gl.css';
 import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
 import './styles.css';
 
 const SCENE_LIMIT_METERS = 42;
 const MAP_CENTER = 110;
 const MAP_SCALE = 2.45;
+const MAPBOX_ACCESS_TOKEN = 'pk.eyJ1IjoibXl6b21hcCIsImEiOiJjbTBnOWx1eWoxNzc4MnFwdXZqNzl5bmhrIn0.P8CDFlyi9xvQZs9htiaKNg';
+const ROUTE_START = { latitude: 37.42885, longitude: -122.17315 };
+const ROUTE_END = { latitude: 37.42874, longitude: -122.17265 };
+const ROUTE_ANIMATION_SECONDS = 12;
+const MAPBOX_CAMERA_BEARING_OFFSET = 0;
 const CART_MODEL_YAW_OFFSET = 0;
 const CART_MODEL_PATH = '/models/Electric_Cart.fbx';
-const CART_MODEL_TARGET_LENGTH = 3.15;
+const START_CART_MODEL_TARGET_LENGTH = 3.15;
+const DRIVE_CART_MODEL_SCALE = 0.2;
 const EGO_OBJECT_CLEAR_RADIUS_METERS = 3.4;
+const START_CAMERA_POSITION = new THREE.Vector3(-3.9, 2.65, 4.8);
+const START_CAMERA_TARGET = new THREE.Vector3(0, 0.92, 0.18);
+const DRIVE_CAMERA_POSITION = new THREE.Vector3(0, 8.5, 13);
+const DRIVE_CAMERA_TARGET = new THREE.Vector3(0, 0, 0);
+const START_CART_YAW = 0;
+const START_TRANSITION_MS = 1800;
+const CAMERA_RETURN_POSITION_LERP = 0.16;
+const DATA_SOURCES = [
+  { type: 'segmentation', path: '/data/segmentation.json' },
+  { type: 'sparsedrive', path: '/data/bev_predictions.json' }
+];
 
-const sparseDriveData = await fetch('/data/bev_predictions.json').then((response) => response.json());
-const telemetry = normalizeSparseDriveData(sparseDriveData);
+mapboxgl.accessToken = MAPBOX_ACCESS_TOKEN;
+
+const telemetry = createMapboxRouteTelemetry();
 const SOURCE_FRAME_INTERVAL_MS = 1000 / telemetry.frameRateHz;
-const REPLAY_SPEED = 0.75;
+const REPLAY_SPEED = 1;
 const FRAME_INTERVAL_MS = SOURCE_FRAME_INTERVAL_MS / REPLAY_SPEED;
 const INTERPOLATION_LOOP_FRAMES = Math.max(1, telemetry.frames.length - 1);
 
 const root = document.getElementById('root');
 root.innerHTML = `
   <main class="screen">
+    <div class="mapbox-scene" aria-label="Map route visualization"></div>
     <div class="scene-canvas" aria-label="3D autonomy visualization"></div>
-    <section class="hud" aria-label="Autonomous golf cart dashboard">
+    <section class="start-screen" aria-label="Start drive">
+      <h1>Hey, Sam!</h1>
+      <button class="start-button" type="button">Start</button>
+    </section>
+    <section class="hud is-hidden" aria-label="Autonomous golf cart dashboard">
       <div class="autonomy-status" aria-label="Self driving status">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M5.1 13.4a7 7 0 1 1 13.8 0" />
@@ -74,6 +100,11 @@ root.innerHTML = `
 `;
 
 const ui = {
+  screen: document.querySelector('.screen'),
+  mapbox: document.querySelector('.mapbox-scene'),
+  startScreen: document.querySelector('.start-screen'),
+  startButton: document.querySelector('.start-button'),
+  hud: document.querySelector('.hud'),
   speed: document.querySelector('.speed-number'),
   autonomy: document.querySelector('.autonomy-status'),
   route: document.querySelector('.map-route'),
@@ -83,9 +114,22 @@ const ui = {
 
 let currentFrame = telemetry.frames[0];
 let replayStartMs = performance.now();
+let driveStarted = false;
+let transitionStartMs = null;
 updateHud(currentFrame);
 
-initScene(document.querySelector('.scene-canvas'));
+const mapboxMap = initMapboxMap(ui.mapbox);
+initScene(document.querySelector('.scene-canvas'), mapboxMap);
+
+ui.startButton.addEventListener('click', () => {
+  if (driveStarted) return;
+  driveStarted = true;
+  transitionStartMs = performance.now();
+  replayStartMs = transitionStartMs;
+  ui.screen.classList.add('is-driving');
+  ui.startScreen.setAttribute('aria-hidden', 'true');
+  ui.hud.classList.remove('is-hidden');
+});
 
 function updateHud(frame) {
   ui.speed.textContent = frame.speedMph;
@@ -96,6 +140,283 @@ function updateHud(frame) {
   ui.cart.setAttribute('cx', frame.position.x);
   ui.cart.setAttribute('cy', frame.position.y);
   ui.pin.setAttribute('transform', `translate(${frame.destination.x - 12} ${frame.destination.y - 28})`);
+}
+
+function createMapboxRouteTelemetry() {
+  const frameRateHz = 30;
+  const frameCount = ROUTE_ANIMATION_SECONDS * frameRateHz;
+  const routeCoordinates = interpolatedRouteCoordinates(ROUTE_START, ROUTE_END, 120);
+  const routeBearingDegrees = bearingBetweenCoordinates(ROUTE_START, ROUTE_END);
+  const routeLengthMeters = distanceBetweenCoordinates(ROUTE_START, ROUTE_END);
+  const speedMph = Math.round((routeLengthMeters / ROUTE_ANIMATION_SECONDS) * 2.23694);
+
+  return {
+    frameRateHz,
+    routeCoordinates,
+    routeBearingDegrees,
+    frames: Array.from({ length: frameCount }, (_, index) => {
+      const progress = index / (frameCount - 1);
+      const coordinate = interpolateCoordinate(ROUTE_START, ROUTE_END, progress);
+      const remainingCoordinates = [
+        coordinate,
+        ...routeCoordinates.slice(Math.min(routeCoordinates.length - 1, Math.floor(progress * (routeCoordinates.length - 1)) + 1))
+      ];
+      const localPath = createRouteLocalPath(progress);
+      const route = localPath.map(toMapPoint);
+
+      return {
+        frameIdx: index,
+        speedMph,
+        selfDriving: true,
+        position: { x: MAP_CENTER, y: MAP_CENTER },
+        destination: route.at(-1) ?? { x: MAP_CENTER, y: 48 },
+        route,
+        predictedPath: localPath.map(toScenePoint),
+        mapElements: [],
+        objects: [],
+        mapbox: {
+          coordinate,
+          progress,
+          remainingCoordinates,
+          bearing: routeBearingDegrees
+        }
+      };
+    })
+  };
+}
+
+function initMapboxMap(container) {
+  const midpoint = interpolateCoordinate(ROUTE_START, ROUTE_END, 0.5);
+  const map = new mapboxgl.Map({
+    container,
+    style: 'mapbox://styles/mapbox/standard',
+    center: [midpoint.longitude, midpoint.latitude],
+    zoom: 17.2,
+    bearing: 0,
+    pitch: 45,
+    attributionControl: false,
+    logoPosition: 'bottom-left',
+    interactive: false,
+    config: {
+      basemap: {
+        lightPreset: 'day',
+        theme: 'monochrome',
+        showPedestrianRoads: false,
+        showRoadsAndTransit: false,
+        showRoadLabels: false,
+        showPlaceLabels: true,
+        showPointOfInterestLabels: true,
+        showTransitLabels: false,
+        show3dObjects: true,
+        show3dBuildings: true
+      }
+    }
+  });
+
+  map.on('style.load', () => {
+    map.setProjection('globe');
+    addMapboxRouteLayers(map);
+    updateMapboxRoute(map, currentFrame);
+  });
+
+  return map;
+}
+
+function addMapboxRouteLayers(map) {
+  if (!map.getSource('cart-route')) {
+    map.addSource('cart-route', {
+      type: 'geojson',
+      data: createRouteFeatureCollection(telemetry.routeCoordinates)
+    });
+  }
+
+  if (!map.getLayer('cart-route-casing')) {
+    map.addLayer({
+      id: 'cart-route-casing',
+      type: 'line',
+      source: 'cart-route',
+      slot: 'top',
+      layout: {
+        'line-cap': 'round',
+        'line-join': 'round'
+      },
+      paint: {
+        'line-color': '#ffffff',
+        'line-width': 12,
+        'line-opacity': 0.88
+      }
+    });
+  }
+
+  if (!map.getLayer('cart-route-line')) {
+    map.addLayer({
+      id: 'cart-route-line',
+      type: 'line',
+      source: 'cart-route',
+      slot: 'top',
+      layout: {
+        'line-cap': 'round',
+        'line-join': 'round'
+      },
+      paint: {
+        'line-color': '#1683ff',
+        'line-width': 9,
+        'line-opacity': 0.98
+      }
+    });
+  }
+}
+
+function updateMapboxRoute(map, frame) {
+  if (!map || !frame.mapbox || !map.getSource('cart-route')) return;
+
+  const { coordinate, bearing } = frame.mapbox;
+  const source = map.getSource('cart-route');
+  if (source) source.setData(createRouteFeatureCollection(telemetry.routeCoordinates));
+
+  map.jumpTo({
+    center: [coordinate.longitude, coordinate.latitude],
+    zoom: 18.7,
+    bearing: bearing + MAPBOX_CAMERA_BEARING_OFFSET,
+    pitch: 58
+  });
+}
+
+function createRouteFeatureCollection(coordinates) {
+  const lineCoordinates = coordinates.length >= 2
+    ? coordinates
+    : [coordinates[0] ?? ROUTE_END, ROUTE_END];
+
+  return {
+    type: 'FeatureCollection',
+    features: [
+      {
+        type: 'Feature',
+        properties: {},
+        geometry: {
+          type: 'LineString',
+          coordinates: lineCoordinates.map((coordinate) => [coordinate.longitude, coordinate.latitude])
+        }
+      }
+    ]
+  };
+}
+
+function createRouteLocalPath(progress) {
+  const routeLengthMeters = distanceBetweenCoordinates(ROUTE_START, ROUTE_END);
+  const remainingMeters = routeLengthMeters * (1 - progress);
+  const sampleCount = 10;
+  return Array.from({ length: sampleCount }, (_, index) => {
+    const forward = (remainingMeters * index) / (sampleCount - 1);
+    return [0, forward];
+  });
+}
+
+function interpolatedRouteCoordinates(start, end, steps) {
+  return Array.from({ length: steps + 1 }, (_, index) => interpolateCoordinate(start, end, index / steps));
+}
+
+function interpolateCoordinate(start, end, progress) {
+  return {
+    latitude: start.latitude + (end.latitude - start.latitude) * progress,
+    longitude: start.longitude + (end.longitude - start.longitude) * progress
+  };
+}
+
+function distanceBetweenCoordinates(start, end) {
+  const earthRadiusMeters = 6371000;
+  const startLat = degreesToRadians(start.latitude);
+  const endLat = degreesToRadians(end.latitude);
+  const deltaLat = degreesToRadians(end.latitude - start.latitude);
+  const deltaLon = degreesToRadians(end.longitude - start.longitude);
+  const a = Math.sin(deltaLat / 2) ** 2
+    + Math.cos(startLat) * Math.cos(endLat) * Math.sin(deltaLon / 2) ** 2;
+  return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function bearingBetweenCoordinates(start, end) {
+  const startLatitude = degreesToRadians(start.latitude);
+  const startLongitude = degreesToRadians(start.longitude);
+  const endLatitude = degreesToRadians(end.latitude);
+  const endLongitude = degreesToRadians(end.longitude);
+  const longitudeDelta = endLongitude - startLongitude;
+  const y = Math.sin(longitudeDelta) * Math.cos(endLatitude);
+  const x = Math.cos(startLatitude) * Math.sin(endLatitude)
+    - Math.sin(startLatitude) * Math.cos(endLatitude) * Math.cos(longitudeDelta);
+  return (radiansToDegrees(Math.atan2(y, x)) + 360) % 360;
+}
+
+function degreesToRadians(value) {
+  return value * Math.PI / 180;
+}
+
+function radiansToDegrees(value) {
+  return value * 180 / Math.PI;
+}
+
+async function loadTelemetryData() {
+  for (const source of DATA_SOURCES) {
+    try {
+      const response = await fetch(source.path, { cache: 'no-store' });
+      if (!response.ok) continue;
+      return {
+        type: source.type,
+        path: source.path,
+        data: await response.json()
+      };
+    } catch (error) {
+      console.warn(`Unable to load ${source.path}`, error);
+    }
+  }
+
+  throw new Error('No telemetry data source found. Add public/data/segmentation.json or public/data/bev_predictions.json.');
+}
+
+function normalizeTelemetryData(source) {
+  if (source.type === 'segmentation') {
+    console.info(`Using segmentation data from ${source.path}`);
+    return normalizeSegmentationData(source.data);
+  }
+
+  console.info(`Using SparseDrive data from ${source.path}`);
+  return normalizeSparseDriveData(source.data);
+}
+
+function normalizeSegmentationData(data) {
+  const frames = Array.isArray(data) ? data : data.frames ?? data.segmentation_frames ?? [];
+  const frameRateHz = data.meta?.frame_rate_hz ?? data.frame_rate_hz ?? data.fps ?? 10;
+  const pointOrder = data.meta?.point_order ?? data.point_order ?? 'lateral_forward';
+
+  if (frames.length === 0) {
+    throw new Error('Segmentation JSON must contain a non-empty frames array.');
+  }
+
+  return {
+    frameRateHz,
+    frames: frames.map((frame, index) => normalizeSegmentationFrame(frame, index, pointOrder, frameRateHz))
+  };
+}
+
+function normalizeSegmentationFrame(frame, index, pointOrder, frameRateHz) {
+  const predictedPath = normalizePointPath(
+    pickFirst(frame.predictedPath, frame.predicted_path, frame.trajectory, frame.path, frame.planning?.final_xy),
+    pointOrder
+  );
+  const fallbackPath = predictedPath.length >= 2 ? predictedPath : createDefaultPredictedPath();
+  const route = fallbackPath.map(toMapPointFromScene);
+  const destination = route.at(-1) ?? { x: MAP_CENTER, y: 48 };
+
+  return {
+    frameIdx: frame.frame_idx ?? frame.frameIndex ?? frame.index ?? index,
+    speedMph: getFrameSpeedMph(frame, fallbackPath, frameRateHz),
+    selfDriving: frame.selfDriving ?? frame.self_driving ?? frame.autonomous ?? true,
+    position: { x: MAP_CENTER, y: MAP_CENTER },
+    destination,
+    route,
+    predictedPath: fallbackPath,
+    mapElements: collectSegmentationMapElements(frame, pointOrder),
+    objects: collectSegmentationObjects(frame, pointOrder)
+  };
 }
 
 function normalizeSparseDriveData(data) {
@@ -213,6 +534,233 @@ function getDetectionDimensions(detection) {
   return { width: 1.9, length: 4.35, height: 1.08 };
 }
 
+function collectSegmentationMapElements(frame, pointOrder) {
+  const nonObjectSegments = (items) => (items ?? []).filter((item) => !isObjectSegment(item));
+  const elements = [
+    ...normalizeSegmentationElementList(frame.lanes ?? frame.laneLines ?? frame.lane_lines, 'divider', pointOrder),
+    ...normalizeSegmentationElementList(frame.boundaries ?? frame.road_edges ?? frame.edges, 'boundary', pointOrder),
+    ...normalizeSegmentationElementList(frame.dividers, 'divider', pointOrder),
+    ...normalizeSegmentationElementList(frame.segmentation?.lanes, 'divider', pointOrder),
+    ...normalizeSegmentationElementList(frame.segmentation?.boundaries, 'boundary', pointOrder),
+    ...normalizeSegmentationElementList(frame.segmentation?.polylines, 'divider', pointOrder),
+    ...normalizeSegmentationElementList(nonObjectSegments(frame.segments), 'boundary', pointOrder),
+    ...normalizeSegmentationElementList(nonObjectSegments(frame.segmentations), 'boundary', pointOrder),
+    ...normalizeSegmentationElementList(nonObjectSegments(frame.polygons), 'boundary', pointOrder)
+  ];
+
+  return elements
+    .filter((element) => element.points.length >= 2)
+    .slice(0, 64);
+}
+
+function normalizeSegmentationElementList(items, fallbackType, pointOrder) {
+  if (!Array.isArray(items)) return [];
+
+  return items
+    .map((item) => normalizeSegmentationElement(item, fallbackType, pointOrder))
+    .filter(Boolean);
+}
+
+function normalizeSegmentationElement(item, fallbackType, pointOrder) {
+  if (!item) return null;
+  const rawType = getItemClass(item);
+  const type = getMapElementType(rawType, fallbackType);
+  const rawPoints = Array.isArray(item)
+    ? item
+    : item.points ?? item.polyline ?? item.centerline ?? item.polygon ?? item.vertices;
+  let points = normalizePointPath(rawPoints, item.point_order ?? pointOrder);
+
+  if ((item.polygon || item.vertices) && points.length >= 3) {
+    points = [...points, points[0]];
+  }
+
+  if (points.length < 2) return null;
+  return {
+    type,
+    score: item.score ?? item.confidence ?? item.probability ?? 1,
+    points: points.filter(isScenePointVisible)
+  };
+}
+
+function getMapElementType(rawType, fallbackType) {
+  const label = String(rawType ?? fallbackType).toLowerCase();
+  if (label.includes('lane') || label.includes('divider') || label.includes('line') || label.includes('center')) return 'divider';
+  return 'boundary';
+}
+
+function collectSegmentationObjects(frame, pointOrder) {
+  const candidates = [
+    ...(frame.objects ?? []),
+    ...(frame.detections ?? []),
+    ...(frame.segmentation?.objects ?? []),
+    ...(frame.segments ?? []).filter(isObjectSegment),
+    ...(frame.segmentations ?? []).filter(isObjectSegment),
+    ...(frame.polygons ?? []).filter(isObjectSegment)
+  ];
+
+  return candidates
+    .map((item) => normalizeSegmentationObject(item, pointOrder))
+    .filter(Boolean)
+    .slice(0, 32);
+}
+
+function normalizeSegmentationObject(item, pointOrder) {
+  if (!item) return null;
+  const type = getObjectType(getItemClass(item));
+  const point = normalizeObjectCenter(item, pointOrder);
+  if (!point) return null;
+
+  const polygonPoints = normalizePointPath(item.polygon ?? item.vertices, item.point_order ?? pointOrder);
+  const bounds = polygonPoints.length > 0 ? getSceneBounds(polygonPoints) : null;
+  const width = Number(item.width ?? item.w ?? bounds?.width);
+  const length = Number(item.length ?? item.l ?? bounds?.length);
+  const height = Number(item.height ?? item.h);
+  const dimensions = getSegmentationObjectDimensions(type, width, length, height);
+
+  return {
+    id: item.id,
+    type,
+    x: clamp(point.x, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS),
+    z: clamp(point.z, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS),
+    width: dimensions.width,
+    length: dimensions.length,
+    height: dimensions.height,
+    heading: item.heading ?? item.yaw ?? item.rotation ?? 0
+  };
+}
+
+function normalizeObjectCenter(item, pointOrder) {
+  const center = item.center ?? item.centroid ?? item.position ?? item.location;
+  if (center) return normalizePoint(center, item.point_order ?? pointOrder);
+  if (Number.isFinite(item.x) && Number.isFinite(item.z)) return { x: item.x, z: item.z };
+  if (Number.isFinite(item.x) && Number.isFinite(item.y)) return normalizePoint([item.x, item.y], item.point_order ?? pointOrder);
+
+  const polygonPoints = normalizePointPath(item.polygon ?? item.vertices, item.point_order ?? pointOrder);
+  if (polygonPoints.length === 0) return null;
+  return getPathCenter(polygonPoints);
+}
+
+function isObjectSegment(item) {
+  const label = String(getItemClass(item)).toLowerCase();
+  return ['car', 'truck', 'bus', 'vehicle', 'pedestrian', 'person', 'cyclist', 'bicycle', 'motorcycle', 'object']
+    .some((name) => label.includes(name));
+}
+
+function getObjectType(rawType) {
+  const label = String(rawType ?? 'object').toLowerCase();
+  if (label.includes('pedestrian') || label.includes('person')) return 'pedestrian';
+  if (label.includes('bicycle') || label.includes('cyclist')) return 'bicycle';
+  if (label.includes('motorcycle')) return 'motorcycle';
+  if (label.includes('truck')) return 'truck';
+  if (label.includes('bus')) return 'bus';
+  return 'car';
+}
+
+function getSegmentationObjectDimensions(type, width, length, height) {
+  if (type === 'pedestrian') {
+    return {
+      width: Number.isFinite(width) ? clamp(width, 0.45, 0.9) : 0.72,
+      length: Number.isFinite(length) ? clamp(length, 0.45, 0.9) : 0.72,
+      height: Number.isFinite(height) ? clamp(height, 1.35, 1.9) : 1.72
+    };
+  }
+
+  if (type === 'motorcycle' || type === 'bicycle') {
+    return {
+      width: Number.isFinite(width) ? clamp(width, 0.55, 1.2) : 0.86,
+      length: Number.isFinite(length) ? clamp(length, 1.3, 2.6) : 2.15,
+      height: Number.isFinite(height) ? clamp(height, 0.7, 1.35) : 0.9
+    };
+  }
+
+  if (type === 'truck' || type === 'bus') {
+    return {
+      width: Number.isFinite(width) ? clamp(width, 2.1, 2.8) : 2.45,
+      length: Number.isFinite(length) ? clamp(length, 5.2, 8.5) : 6.8,
+      height: Number.isFinite(height) ? clamp(height, 1.3, 2.2) : 1.55
+    };
+  }
+
+  return {
+    width: Number.isFinite(width) ? clamp(width, 1.5, 2.4) : 1.9,
+    length: Number.isFinite(length) ? clamp(length, 3.4, 5.2) : 4.35,
+    height: Number.isFinite(height) ? clamp(height, 0.9, 1.45) : 1.08
+  };
+}
+
+function normalizePointPath(points, pointOrder) {
+  if (!Array.isArray(points)) return [];
+  return points
+    .map((point) => normalizePoint(point, pointOrder))
+    .filter(Boolean)
+    .filter(isScenePointVisible);
+}
+
+function normalizePoint(point, pointOrder = 'lateral_forward') {
+  if (Array.isArray(point)) {
+    const first = Number(point[0]);
+    const second = Number(point[1]);
+    if (!Number.isFinite(first) || !Number.isFinite(second)) return null;
+    return isForwardLateralPointOrder(pointOrder)
+      ? { x: clamp(second, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS), z: clamp(-first, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS) }
+      : { x: clamp(first, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS), z: clamp(-second, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS) };
+  }
+
+  if (!point || typeof point !== 'object') return null;
+  if (Number.isFinite(point.x) && Number.isFinite(point.z)) {
+    return {
+      x: clamp(point.x, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS),
+      z: clamp(point.z, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS)
+    };
+  }
+
+  const isForwardFirst = isForwardLateralPointOrder(pointOrder);
+  const lateral = Number(pickFirst(point.lateral, point.lateral_m, point.y_lat, point.left, isForwardFirst ? point.y : point.x));
+  const forward = Number(pickFirst(point.forward, point.forward_m, point.x_fwd, point.distance, isForwardFirst ? point.x : point.y));
+  if (!Number.isFinite(lateral) || !Number.isFinite(forward)) return null;
+
+  return {
+    x: clamp(lateral, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS),
+    z: clamp(-forward, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS)
+  };
+}
+
+function isForwardLateralPointOrder(pointOrder) {
+  return pointOrder === 'forward_lateral' || pointOrder === 'x_forward_y_left';
+}
+
+function createDefaultPredictedPath() {
+  return [0, 3, 6, 9, 12, 15].map((forward) => ({ x: 0, z: -forward }));
+}
+
+function getFrameSpeedMph(frame, path, frameRateHz) {
+  if (Number.isFinite(frame.speedMph)) return Math.round(frame.speedMph);
+  if (Number.isFinite(frame.speed_mph)) return Math.round(frame.speed_mph);
+  if (Number.isFinite(frame.speed_mps)) return Math.round(frame.speed_mps * 2.23694);
+  if (Number.isFinite(frame.speed)) return Math.round(frame.speed);
+
+  const start = path[0] ?? { x: 0, z: 0 };
+  const next = path[1] ?? start;
+  return Math.round(Math.hypot(next.x - start.x, next.z - start.z) * frameRateHz * 2.23694);
+}
+
+function getSceneBounds(points) {
+  const xs = points.map((point) => point.x);
+  const zs = points.map((point) => point.z);
+  return {
+    width: Math.max(...xs) - Math.min(...xs),
+    length: Math.max(...zs) - Math.min(...zs)
+  };
+}
+
+function getItemClass(item) {
+  return item?.class ?? item?.label ?? item?.type ?? item?.category ?? item?.name;
+}
+
+function pickFirst(...values) {
+  return values.find((value) => value !== undefined && value !== null);
+}
+
 function toScenePoint([lateral, forward]) {
   return {
     x: clamp(lateral, -SCENE_LIMIT_METERS, SCENE_LIMIT_METERS),
@@ -224,6 +772,13 @@ function toMapPoint([lateral, forward]) {
   return {
     x: clamp(MAP_CENTER + lateral * MAP_SCALE, 18, 202),
     y: clamp(MAP_CENTER - forward * MAP_SCALE, 18, 202)
+  };
+}
+
+function toMapPointFromScene(point) {
+  return {
+    x: clamp(MAP_CENTER + point.x * MAP_SCALE, 18, 202),
+    y: clamp(MAP_CENTER + point.z * MAP_SCALE, 18, 202)
   };
 }
 
@@ -254,7 +809,20 @@ function interpolateFrames(frameA, frameB, alpha) {
     route: interpolatePointPath(frameA.route, frameB.route, alpha),
     predictedPath: interpolatePointPath(frameA.predictedPath, frameB.predictedPath, alpha),
     mapElements: interpolateMapElements(frameA.mapElements, frameB.mapElements, alpha),
-    objects: interpolateObjects(frameA.objects, frameB.objects, alpha)
+    objects: interpolateObjects(frameA.objects, frameB.objects, alpha),
+    mapbox: interpolateMapboxFrame(frameA.mapbox, frameB.mapbox, alpha)
+  };
+}
+
+function interpolateMapboxFrame(mapboxA, mapboxB, alpha) {
+  if (!mapboxA || !mapboxB) return mapboxA ?? mapboxB;
+  const progress = lerp(mapboxA.progress, mapboxB.progress, alpha);
+
+  return {
+    progress,
+    coordinate: interpolateCoordinate(ROUTE_START, ROUTE_END, progress),
+    remainingCoordinates: mapboxA.remainingCoordinates,
+    bearing: lerp(mapboxA.bearing, mapboxB.bearing, alpha)
   };
 }
 
@@ -416,21 +984,31 @@ function smoothstep(alpha) {
   return alpha * alpha * (3 - 2 * alpha);
 }
 
-function initScene(mount) {
+function easeInOutCubic(alpha) {
+  return alpha < 0.5
+    ? 4 * alpha * alpha * alpha
+    : 1 - ((-2 * alpha + 2) ** 3) / 2;
+}
+
+function initScene(mount, mapboxMap) {
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0xffffff);
+  scene.background = null;
 
   const camera = new THREE.PerspectiveCamera(42, mount.clientWidth / mount.clientHeight, 0.1, 120);
-  camera.position.set(0, 8.5, 13);
-  camera.lookAt(0, 0, 0);
+  camera.position.copy(START_CAMERA_POSITION);
+  camera.lookAt(START_CAMERA_TARGET);
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setClearColor(0xffffff, 0);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(mount.clientWidth, mount.clientHeight);
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   mount.appendChild(renderer.domElement);
+
+  const controlsState = { active: false };
+  const controls = createCartOrbitControls(camera, renderer.domElement, controlsState);
 
   scene.add(new THREE.HemisphereLight(0xffffff, 0xdde4ea, 2.4));
 
@@ -442,15 +1020,18 @@ function initScene(mount) {
   scene.add(createGround());
 
   const prediction = createPredictionPath();
+  prediction.visible = false;
   scene.add(prediction);
 
   const cart = new THREE.Group();
   scene.add(cart);
 
   const mapLayer = new THREE.Group();
+  mapLayer.visible = false;
   scene.add(mapLayer);
 
   const objectLayer = new THREE.Group();
+  objectLayer.visible = false;
   scene.add(objectLayer);
 
   const fbxLoader = new FBXLoader();
@@ -472,18 +1053,99 @@ function initScene(mount) {
   const clock = new THREE.Clock();
   const animate = () => {
     const elapsed = clock.getElapsedTime();
+    const nowMs = performance.now();
+    const transitionProgress = getStartTransitionProgress(nowMs);
+    const cameraProgress = easeInOutCubic(transitionProgress);
     currentFrame = getInterpolatedFrame(performance.now());
     updateHud(currentFrame);
+    updateMapboxRoute(mapboxMap, currentFrame);
     replaceMapElements(mapLayer, currentFrame.mapElements);
     replaceSceneObjects(objectLayer, currentFrame.objects);
     updatePredictionPath(prediction, currentFrame.predictedPath);
-    cart.rotation.y = getPathHeading(currentFrame.predictedPath) + CART_MODEL_YAW_OFFSET;
+    updateSceneMode({
+      camera,
+      cart,
+      prediction,
+      mapLayer,
+      objectLayer,
+      controls,
+      controlsState,
+      transitionProgress,
+      cameraProgress
+    });
 
     cart.position.y = Math.sin(elapsed * 1.4) * 0.025;
     renderer.render(scene, camera);
     window.requestAnimationFrame(animate);
   };
   animate();
+}
+
+function getStartTransitionProgress(nowMs) {
+  if (!driveStarted) return 0;
+  return clamp((nowMs - transitionStartMs) / START_TRANSITION_MS, 0, 1);
+}
+
+function createCartOrbitControls(camera, element, controlsState) {
+  const controls = new OrbitControls(camera, element);
+  controls.enabled = false;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.12;
+  controls.enablePan = false;
+  controls.minDistance = 5.2;
+  controls.maxDistance = 22;
+  controls.minPolarAngle = 0.16;
+  controls.maxPolarAngle = Math.PI * 0.48;
+  controls.rotateSpeed = 0.55;
+  controls.zoomSpeed = 0.72;
+  controls.target.copy(DRIVE_CAMERA_TARGET);
+  controls.addEventListener('start', () => {
+    if (driveStarted && getStartTransitionProgress(performance.now()) >= 1) {
+      controlsState.active = true;
+    }
+  });
+  controls.addEventListener('end', () => {
+    controlsState.active = false;
+  });
+
+  return controls;
+}
+
+function updateSceneMode({
+  camera,
+  cart,
+  prediction,
+  mapLayer,
+  objectLayer,
+  controls,
+  controlsState,
+  transitionProgress,
+  cameraProgress
+}) {
+  const driveCartYaw = getPathHeading(currentFrame.predictedPath) + CART_MODEL_YAW_OFFSET;
+  cart.rotation.y = lerpAngle(START_CART_YAW, driveCartYaw, cameraProgress);
+  cart.scale.setScalar(lerp(1, DRIVE_CART_MODEL_SCALE, cameraProgress));
+
+  if (transitionProgress < 1) {
+    controls.enabled = false;
+    camera.position.lerpVectors(START_CAMERA_POSITION, DRIVE_CAMERA_POSITION, cameraProgress);
+    camera.lookAt(new THREE.Vector3().lerpVectors(START_CAMERA_TARGET, DRIVE_CAMERA_TARGET, cameraProgress));
+    controls.target.copy(DRIVE_CAMERA_TARGET);
+  } else {
+    controls.enabled = true;
+    controls.target.copy(DRIVE_CAMERA_TARGET);
+    if (controlsState.active) {
+      controls.update();
+    } else {
+      camera.position.lerp(DRIVE_CAMERA_POSITION, CAMERA_RETURN_POSITION_LERP);
+      camera.lookAt(DRIVE_CAMERA_TARGET);
+    }
+  }
+
+  prediction.visible = false;
+  mapLayer.visible = false;
+  objectLayer.visible = false;
+  prediction.material.opacity = 0;
 }
 
 function createGround() {
@@ -689,7 +1351,7 @@ function fitModelToCartEnvelope(model) {
   const horizontalLength = Math.max(initialSize.x, initialSize.z);
 
   if (horizontalLength > 0) {
-    const scale = CART_MODEL_TARGET_LENGTH / horizontalLength;
+    const scale = START_CART_MODEL_TARGET_LENGTH / horizontalLength;
     model.scale.multiplyScalar(scale);
   }
 

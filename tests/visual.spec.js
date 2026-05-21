@@ -1,14 +1,19 @@
 import { expect, test } from '@playwright/test';
 
-test('dashboard renders HUD and nonblank WebGL scene', async ({ page }) => {
+test('start screen transitions into HUD and nonblank WebGL scene', async ({ page }) => {
   await page.goto('http://localhost:5173');
+  await expect(page.getByRole('heading', { name: 'Hey, Sam!' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Start' })).toBeVisible();
+  await expect(page.locator('.scene-canvas canvas')).toBeVisible();
+  await page.waitForTimeout(900);
+  await page.getByRole('button', { name: 'Start' }).click();
+  await expect(page.locator('.screen')).toHaveClass(/is-driving/);
+  await page.waitForTimeout(2200);
   await expect(page.locator('.speed-readout')).toBeVisible();
-  await expect(page.locator('.mini-map')).toBeVisible();
-  await expect(page.locator('canvas')).toBeVisible();
-  await page.waitForTimeout(1500);
+  await expect(page.locator('.mapbox-scene')).toBeVisible();
 
   const canvasState = await page.evaluate(() => {
-    const canvas = document.querySelector('canvas');
+    const canvas = document.querySelector('.scene-canvas canvas');
     if (!canvas) return { hasCanvas: false, width: 0, height: 0, nonWhiteSamples: 0 };
 
     const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
